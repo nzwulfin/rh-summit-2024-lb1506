@@ -1,12 +1,8 @@
 BOOTC_IMAGE ?= registry.redhat.io/rhel9/rhel-bootc:9.4
-#BOOTC_IMAGE ?= quay.io/centos-bootc/centos-bootc:stream9
-BOOTC_IMAGE_CS ?= quay.io/centos-bootc/centos-bootc:stream9
-
 BOOTC_IMAGE_BUILDER ?= registry.redhat.io/rhel9/bootc-image-builder:latest
-BOOTC_IMAGE_BUILDER_CS ?= quay.io/centos-bootc/bootc-image-builder:latest
 
 LIBVIRT_DEFAULT_URI ?= qemu:///system
-LIBVIRT_NETWORK ?= summit-network
+LIBVIRT_NETWORK ?= default
 LIBVIRT_STORAGE ?= summit-storage
 LIBVIRT_STORAGE_DIR ?= /var/lib/libvirt/images/summit
 
@@ -17,23 +13,21 @@ LIBVIRT_QCOW_VM_NAME ?= qcow
 ISO_URL ?= https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-latest-x86_64-boot.iso
 ISO_NAME ?= rhel-boot
 
-CC_QCOW_URL ?= https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2
-
-CONTAINER ?= summit.registry/lb1506:latest
+CONTAINER ?= ${REGISTRY}/bootc
 CONTAINERFILE ?= Containerfile
 
 REGISTRY_POD ?= registry-pod.yaml
 
 .PHONY: certs templates
 
-setup: system-setup vm-setup registry-certs ssh templates registry iso-download setup-pull
+setup: system-setup templates iso-download
 clean: vm-setup-clean iso-clean qcow-clean templates-clean registry-certs-clean
 
 setup-registry: registry-certs registry
 
 vm-setup: vm-setup-network vm-setup-storage
 vm-setup-clean: vm-clean-all vm-clean-network vm-clean-storage
-vm-clean-all: vm-regular-clean vm-iso-clean vm-qcow-clean
+vm-clean-all: vm-iso-clean vm-qcow-clean
 
 vm-setup-network:
 	grep summit.registry /etc/hosts || sudo bash -c "echo 192.168.150.1 summit.registry >> /etc/hosts"
@@ -53,11 +47,9 @@ vm-clean-storage:
 	sudo rm -rf "${LIBVIRT_STORAGE_DIR}"
 
 vm-iso:
-	ssh-keygen -R iso-vm
-	ssh-keygen -R 192.168.150.100
 	virt-install --connect "${LIBVIRT_DEFAULT_URI}" \
 		--name "${LIBVIRT_ISO_VM_NAME}" \
-		--disk "pool=${LIBVIRT_STORAGE},size=50" \
+		--disk "pool=${LIBVIRT_STORAGE},size=15" \
 		--network "network=${LIBVIRT_NETWORK},mac=de:ad:be:ef:01:01" \
 		--location "${LIBVIRT_STORAGE_DIR}/${ISO_NAME}-custom.iso,kernel=images/pxeboot/vmlinuz,initrd=images/pxeboot/initrd.img" \
 		--extra-args="inst.ks=hd:LABEL=CentOS-Stream-9-BaseOS-x86_64:/local.ks console=tty0 console=ttyS0,115200n8" \
@@ -70,32 +62,8 @@ vm-iso:
 vm-iso-start:
 	virsh --connect "${LIBVIRT_DEFAULT_URI}" start "${LIBVIRT_ISO_VM_NAME}"
 
-vm-regular:
-	ssh-keygen -R regular-vm
-	ssh-keygen -R 192.168.150.101
-	sudo virt-builder --root-password=password:lb1506 centosstream-9 \
-		--install "podman" \
-		--edit '/etc/ssh/sshd_config:s/#PermitRootLogin prohibit-password/PermitRootLogin yes/' \
-		--copy-in certs/004-summit.conf:/etc/containers/registries.conf.d/ \
-		--ssh-inject 'root:string:$(shell cat ~/.ssh/id_rsa.pub)' \
-		--output "${LIBVIRT_STORAGE_DIR}/${LIBVIRT_REGULAR_VM_NAME}.img" \
-		--size 50G
-	virt-install --connect "${LIBVIRT_DEFAULT_URI}" \
-		--name "${LIBVIRT_REGULAR_VM_NAME}" \
-		--disk "${LIBVIRT_STORAGE_DIR}/${LIBVIRT_REGULAR_VM_NAME}.img" \
-		--import \
-		--network "network=${LIBVIRT_NETWORK},mac=de:ad:be:ef:01:02" \
-		--memory 16000\
-		--graphics none \
-		--noautoconsole \
-		--osinfo centos-stream9 \
-		--noreboot
-	virsh --connect "${LIBVIRT_DEFAULT_URI}" start "${LIBVIRT_REGULAR_VM_NAME}"
-
 vm-qcow:
-	ssh-keygen -R "${LIBVIRT_QCOW_VM_NAME}-vm"
-	ssh-keygen -R 192.168.150.102
-	sudo cp qcow2/disk.qcow2 "${LIBVIRT_STORAGE_DIR}/${LIBVIRT_QCOW_VM_NAME}.qcow2"
+	cp qcow2/disk.qcow2 "${LIBVIRT_STORAGE_DIR}/${LIBVIRT_QCOW_VM_NAME}.qcow2"
 	virt-install --connect "${LIBVIRT_DEFAULT_URI}" \
 		--name "${LIBVIRT_QCOW_VM_NAME}" \
 		--disk "${LIBVIRT_STORAGE_DIR}/${LIBVIRT_QCOW_VM_NAME}.qcow2" \
@@ -111,10 +79,6 @@ vm-qcow:
 vm-qcow-clean:
 	@virsh --connect "${LIBVIRT_DEFAULT_URI}" destroy "${LIBVIRT_QCOW_VM_NAME}" || echo not running
 	@virsh --connect "${LIBVIRT_DEFAULT_URI}" undefine "${LIBVIRT_QCOW_VM_NAME}" --remove-all-storage || echo not defined
-
-vm-regular-clean:
-	@virsh --connect "${LIBVIRT_DEFAULT_URI}" destroy "${LIBVIRT_REGULAR_VM_NAME}" || echo not running
-	@virsh --connect "${LIBVIRT_DEFAULT_URI}" undefine "${LIBVIRT_REGULAR_VM_NAME}" --remove-all-storage || echo not defined
 
 vm-iso-clean:
 	@virsh --connect "${LIBVIRT_DEFAULT_URI}" destroy "${LIBVIRT_ISO_VM_NAME}" || echo not running
@@ -181,10 +145,7 @@ system-setup:
 	sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80
 	git config pull.rebase true
 	echo "export LIBVIRT_DEFAULT_URI=${LIBVIRT_DEFAULT_URI}" >> ~/.bashrc
-	mkdir -p /home/lab-user/.ssh && chmod 0700 /home/lab-user/.ssh
-	touch /home/lab-user/.ssh/known_hosts && chmod 600 /home/lab-user/.ssh/known_hosts
-	cp examples/01.Containerfile Containerfile
-
+	
 build:
 	podman build --file "${CONTAINERFILE}" --tag "${CONTAINER}" \
 		--build-arg SSHPUBKEY="$(shell cat ~/.ssh/id_rsa.pub)"
@@ -200,10 +161,8 @@ status:
 	podman login --get-login registry.redhat.io
 	podman image exists "${BOOTC_IMAGE}"
 	podman image exists "${BOOTC_IMAGE_BUILDER}"
-	podman image exists quay.io/kwozyman/toolbox:httpd
-	podman image exists quay.io/kwozyman/toolbox:registry
 	@systemctl status libvirtd.service | grep Active
 	@virsh --connect "${}" list
 	@sysctl net.ipv4.ip_unprivileged_port_start
 	@podman stats --no-stream --no-reset summit-registry
-	[ -f ./Containerfile &> /dev/null ] && echo 'Starting Containerfile available' 
+	@[ -f ./Containerfile &> /dev/null ] && echo 'Starting Containerfile available' 
