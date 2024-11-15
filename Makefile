@@ -20,7 +20,7 @@ REGISTRY_POD ?= registry-pod.yaml
 
 .PHONY: certs templates
 
-setup: system-setup templates iso-download
+setup: system-setup vm-setup-storage templates iso-download
 clean: vm-setup-clean iso-clean qcow-clean templates-clean registry-certs-clean
 
 setup-registry: registry-certs registry
@@ -164,5 +164,5 @@ status:
 	@systemctl status libvirtd.service | grep Active
 	@virsh --connect "${}" list
 	@sysctl net.ipv4.ip_unprivileged_port_start
-	@podman stats --no-stream --no-reset summit-registry
+	@podman stats --no-stream --no-reset registry
 	@[ -f ./Containerfile &> /dev/null ] && echo 'Starting Containerfile available' 
